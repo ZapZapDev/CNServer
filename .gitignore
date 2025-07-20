@@ -1,0 +1,36 @@
+# === Node modules (якщо використовуєш npm або Vite, Webpack тощо) ===
+node_modules/
+
+# === JetBrains IDE (WebStorm, PhpStorm, тощо) ===
+.idea/
+
+# === VSCode ===
+.vscode/
+.history/
+*.code-workspace
+
+# === OS-specific ===
+.DS_Store              # macOS
+Thumbs.db              # Windows
+
+# === Системні тимчасові файли ===
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+
+
+# === Кеш браузера (рідко, але буває) ===
+.cache/
+*.cache
+
+# === Інші типові файли ===
+.env
+.env.local
+.env.*.local
+
+# === Кеш npm/yarn ===
+.npm/
+.yarn/
+.pnp.*
