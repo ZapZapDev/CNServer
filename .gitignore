@@ -8,6 +8,7 @@ node_modules/
 .vscode/
 .history/
 *.code-workspace
+.package-lock.json
 
 # === OS-specific ===
 .DS_Store              # macOS
