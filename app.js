@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const TransactionController = require('../controllers/transactionController');
+const TransactionController = require('src/controllers/transactionController');
 
 // GET /api/transaction/list?wallet=address - Get transactions for wallet
 router.get('/list', async (req, res) => {
