@@ -5,29 +5,50 @@ const { Connection, PublicKey } = require('@solana/web3.js');
 const app = express();
 const PORT = 3001;
 
-// Solana connection - бесплатные RPC с лучшими лимитами
-const FREE_RPC_ENDPOINTS = [
-    'https://api.mainnet-beta.solana.com',
-    'https://solana-api.projectserum.com',
-    'https://rpc.ankr.com/solana',
-    'https://solana-mainnet.g.alchemy.com/v2/demo',
-    'https://mainnet.helius-rpc.com/?api-key=demo'
-];
-
-// Выбираем случайный RPC для распределения нагрузки
-const SOLANA_RPC = FREE_RPC_ENDPOINTS[Math.floor(Math.random() * FREE_RPC_ENDPOINTS.length)];
+// RPC endpoint
+const SOLANA_RPC = 'https://docs-demo.solana-mainnet.quiknode.pro/';
 console.log(`Using RPC: ${SOLANA_RPC}`);
 
 const connection = new Connection(SOLANA_RPC, {
     commitment: 'confirmed',
-    confirmTransactionInitialTimeout: 60000
+    confirmTransactionInitialTimeout: 30000
 });
 
-// CORS
-app.use(cors());
+// CORS - разрешаем все localhost для разработки
+app.use(cors({
+    origin: function (origin, callback) {
+        if (!origin) return callback(null, true);
+        if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+            return callback(null, true);
+        }
+        return callback(null, true);
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Accept', 'Authorization']
+}));
+
 app.use(express.json());
 
-// Helper function to format addresses
+// Обработка OPTIONS запросов
+app.options('*', (req, res) => {
+    res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Accept, Authorization');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.sendStatus(200);
+});
+
+// Логирование
+app.use((req, res, next) => {
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+    next();
+});
+
+// Кеш для подписей
+const signatureCache = new Map();
+
+// Форматирование адресов
 function formatTransactionAddress(address) {
     if (!address || address === 'Unknown' || address.length < 8) {
         return address;
@@ -35,168 +56,263 @@ function formatTransactionAddress(address) {
     return `${address.slice(0, 4)}...${address.slice(-4)}`;
 }
 
-// Get real transactions from Solana mainnet
-async function getRealTransactions(walletAddress) {
+// Получение символа токена
+function getTokenSymbol(mint) {
+    const knownTokens = {
+        'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 'USDC',
+        'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 'USDT',
+        'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So': 'mSOL',
+        'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 'BONK'
+    };
+    return knownTokens[mint] || 'TOKEN';
+}
+
+// Мок транзакции
+function getMockTransactions(walletAddress) {
+    console.log('Returning mock transactions');
+    return [
+        {
+            id: 'mock_' + Date.now() + '_1',
+            wallet: walletAddress,
+            type: 'received',
+            amount: '0.001000',
+            token: 'SOL',
+            address: 'Jup...Swap',
+            timestamp: new Date(Date.now() - 3600000).toISOString(),
+            signature: 'mock_signature_1'
+        },
+        {
+            id: 'mock_' + Date.now() + '_2',
+            wallet: walletAddress,
+            type: 'sent',
+            amount: '0.000500',
+            token: 'SOL',
+            address: 'Orca...Pool',
+            timestamp: new Date(Date.now() - 86400000).toISOString(),
+            signature: 'mock_signature_2'
+        },
+        {
+            id: 'mock_' + Date.now() + '_3',
+            wallet: walletAddress,
+            type: 'received',
+            amount: '5.000000',
+            token: 'USDC',
+            address: 'Rayd...LP',
+            timestamp: new Date(Date.now() - 86400000 * 2).toISOString(),
+            signature: 'mock_signature_3'
+        }
+    ];
+}
+
+// Основная функция получения транзакций с пагинацией
+async function getRealTransactionsPaginated(walletAddress, page, limit) {
     try {
-        console.log(`Fetching REAL transactions for wallet: ${walletAddress}`);
-        console.log(`Using RPC: ${SOLANA_RPC}`);
+        console.log(`Fetching transactions: wallet=${walletAddress}, page=${page}, limit=${limit}`);
 
         const publicKey = new PublicKey(walletAddress);
+        const cacheKey = `${walletAddress}_signatures`;
 
-        // Get signatures (последние 10 транзакций)
-        console.log('Getting signatures...');
-        const signatures = await connection.getSignaturesForAddress(publicKey, {
-            limit: 10,
-            commitment: 'confirmed'
-        });
+        let allSignatures = signatureCache.get(cacheKey);
 
-        console.log(`Found ${signatures.length} signatures`);
+        // Загружаем подписи если их нет или мало
+        if (!allSignatures || allSignatures.length < page * limit) {
+            console.log('Loading signatures from blockchain...');
 
-        if (signatures.length === 0) {
-            console.log('No transactions found for this wallet');
-            return [];
+            const newSignatures = await connection.getSignaturesForAddress(publicKey, {
+                limit: Math.max(50, page * limit + 20),
+                commitment: 'confirmed'
+            });
+
+            console.log(`Loaded ${newSignatures.length} signatures`);
+            signatureCache.set(cacheKey, newSignatures);
+            allSignatures = newSignatures;
+        }
+
+        // Пагинация
+        const startIndex = (page - 1) * limit;
+        const endIndex = startIndex + limit;
+        const pageSignatures = allSignatures.slice(startIndex, endIndex);
+        const hasMore = endIndex < allSignatures.length;
+
+        console.log(`Processing signatures ${startIndex} to ${endIndex} of ${allSignatures.length}`);
+
+        if (pageSignatures.length === 0) {
+            return {
+                data: page === 1 ? getMockTransactions(walletAddress) : [],
+                hasMore: false,
+                totalFetched: allSignatures.length
+            };
         }
 
         const transactions = [];
+        const processedSigs = new Set();
 
-        // Process each transaction with retry logic
-        for (let i = 0; i < Math.min(signatures.length, 5); i++) {
-            const signatureInfo = signatures[i];
+        // Обрабатываем транзакции для текущей страницы
+        for (let i = 0; i < pageSignatures.length; i++) {
+            const signatureInfo = pageSignatures[i];
+
+            if (processedSigs.has(signatureInfo.signature)) {
+                continue;
+            }
+            processedSigs.add(signatureInfo.signature);
 
             try {
-                console.log(`Processing transaction ${i + 1}/${signatures.length}: ${signatureInfo.signature}`);
+                console.log(`Processing ${i + 1}/${pageSignatures.length}: ${signatureInfo.signature.slice(0, 8)}...`);
 
-                // Retry logic for each transaction
-                let tx = null;
-                let retries = 3;
+                const tx = await connection.getTransaction(signatureInfo.signature, {
+                    maxSupportedTransactionVersion: 0,
+                    commitment: 'confirmed'
+                });
 
-                while (retries > 0 && !tx) {
-                    try {
-                        tx = await connection.getTransaction(signatureInfo.signature, {
-                            maxSupportedTransactionVersion: 0,
-                            commitment: 'confirmed'
-                        });
-                        break;
-                    } catch (error) {
-                        retries--;
-                        if (retries > 0) {
-                            console.log(`Retry ${3 - retries} for transaction ${signatureInfo.signature}`);
-                            await new Promise(resolve => setTimeout(resolve, 1000));
-                        } else {
-                            throw error;
-                        }
-                    }
-                }
-
-                if (!tx || !tx.meta) {
-                    console.log(`Transaction ${signatureInfo.signature} not found or incomplete`);
+                if (!tx || !tx.meta || tx.meta.err) {
+                    console.log('Skipping failed/empty transaction');
                     continue;
                 }
 
-                // Find wallet's account index
-                const accountKeys = tx.transaction.message.accountKeys || tx.transaction.message.staticAccountKeys;
-                const walletIndex = accountKeys.findIndex(key => key.toBase58() === walletAddress);
+                // Получаем account keys
+                let accountKeys = [];
+                if (tx.transaction.message.accountKeys) {
+                    accountKeys = tx.transaction.message.accountKeys;
+                } else if (tx.transaction.message.staticAccountKeys) {
+                    accountKeys = tx.transaction.message.staticAccountKeys;
+                    if (tx.meta.loadedAddresses) {
+                        accountKeys = accountKeys.concat(
+                            tx.meta.loadedAddresses.writable || [],
+                            tx.meta.loadedAddresses.readonly || []
+                        );
+                    }
+                }
+
+                // Находим индекс кошелька
+                const walletIndex = accountKeys.findIndex(key => {
+                    const keyStr = typeof key === 'string' ? key : key.toBase58();
+                    return keyStr === walletAddress;
+                });
 
                 if (walletIndex === -1) {
-                    console.log(`Wallet not found in transaction ${signatureInfo.signature}`);
+                    console.log('Wallet not found in transaction');
                     continue;
                 }
 
-                // Calculate balance change
+                // SOL транзакции
                 const preBalance = tx.meta.preBalances[walletIndex] || 0;
                 const postBalance = tx.meta.postBalances[walletIndex] || 0;
-                const balanceChange = (postBalance - preBalance) / 1000000000; // Convert lamports to SOL
+                const balanceChange = (postBalance - preBalance) / 1000000000;
 
-                console.log(`Transaction ${signatureInfo.signature}: ${balanceChange} SOL change`);
+                if (Math.abs(balanceChange) >= 0.001) {
+                    let otherAddress = 'System';
 
-                // Skip very small changes (dust/fees)
-                if (Math.abs(balanceChange) < 0.0001) {
-                    console.log(`Skipping dust transaction: ${balanceChange} SOL`);
-                    continue;
-                }
-
-                // Determine other party address
-                let otherAddress = 'Unknown';
-                if (accountKeys.length > 1) {
-                    // Get the other main account that's not our wallet
-                    const otherKey = accountKeys.find(key => key.toBase58() !== walletAddress);
-                    if (otherKey) {
-                        otherAddress = otherKey.toBase58();
+                    for (const key of accountKeys) {
+                        const keyStr = typeof key === 'string' ? key : key.toBase58();
+                        if (keyStr !== walletAddress && !keyStr.startsWith('11111111111111111111111111111111')) {
+                            otherAddress = keyStr;
+                            break;
+                        }
                     }
+
+                    const transaction = {
+                        id: signatureInfo.signature,
+                        wallet: walletAddress,
+                        type: balanceChange > 0 ? 'received' : 'sent',
+                        amount: Math.abs(balanceChange).toFixed(6),
+                        token: 'SOL',
+                        address: formatTransactionAddress(otherAddress),
+                        timestamp: new Date((signatureInfo.blockTime || Date.now() / 1000) * 1000).toISOString(),
+                        signature: signatureInfo.signature
+                    };
+
+                    transactions.push(transaction);
+                    console.log(`Added SOL: ${transaction.type} ${transaction.amount}`);
                 }
 
-                const transaction = {
-                    id: signatureInfo.signature,
-                    wallet: walletAddress,
-                    type: balanceChange > 0 ? 'received' : 'sent',
-                    amount: Math.abs(balanceChange).toFixed(6),
-                    token: 'SOL',
-                    address: formatTransactionAddress(otherAddress),
-                    timestamp: new Date((signatureInfo.blockTime || Date.now() / 1000) * 1000).toISOString(),
-                    signature: signatureInfo.signature
-                };
+                // SPL Token трансферы
+                if (tx.meta.preTokenBalances && tx.meta.postTokenBalances) {
+                    const preTokenBalances = tx.meta.preTokenBalances || [];
+                    const postTokenBalances = tx.meta.postTokenBalances || [];
+                    const tokenChanges = new Map();
 
-                transactions.push(transaction);
-                console.log(`Added transaction: ${transaction.type} ${transaction.amount} SOL`);
+                    // Pre-balances
+                    preTokenBalances.forEach(balance => {
+                        if (balance.owner === walletAddress) {
+                            const key = `${balance.mint}_${balance.owner}`;
+                            tokenChanges.set(key, {
+                                mint: balance.mint,
+                                owner: balance.owner,
+                                pre: parseFloat(balance.uiTokenAmount.uiAmountString || '0'),
+                                post: 0,
+                                decimals: balance.uiTokenAmount.decimals
+                            });
+                        }
+                    });
 
-                // Small delay to avoid rate limiting
-                await new Promise(resolve => setTimeout(resolve, 300));
+                    // Post-balances
+                    postTokenBalances.forEach(balance => {
+                        if (balance.owner === walletAddress) {
+                            const key = `${balance.mint}_${balance.owner}`;
+                            if (tokenChanges.has(key)) {
+                                tokenChanges.get(key).post = parseFloat(balance.uiTokenAmount.uiAmountString || '0');
+                            } else {
+                                tokenChanges.set(key, {
+                                    mint: balance.mint,
+                                    owner: balance.owner,
+                                    pre: 0,
+                                    post: parseFloat(balance.uiTokenAmount.uiAmountString || '0'),
+                                    decimals: balance.uiTokenAmount.decimals
+                                });
+                            }
+                        }
+                    });
+
+                    // Обрабатываем изменения токенов
+                    tokenChanges.forEach(change => {
+                        const tokenChange = change.post - change.pre;
+                        if (Math.abs(tokenChange) > 0.001) {
+                            const tokenSymbol = getTokenSymbol(change.mint);
+
+                            const tokenTransaction = {
+                                id: `${signatureInfo.signature}_${change.mint}`,
+                                wallet: walletAddress,
+                                type: tokenChange > 0 ? 'received' : 'sent',
+                                amount: Math.abs(tokenChange).toFixed(6),
+                                token: tokenSymbol,
+                                address: formatTransactionAddress('Token Program'),
+                                timestamp: new Date((signatureInfo.blockTime || Date.now() / 1000) * 1000).toISOString(),
+                                signature: signatureInfo.signature
+                            };
+
+                            transactions.push(tokenTransaction);
+                            console.log(`Added token: ${tokenTransaction.type} ${tokenTransaction.amount} ${tokenSymbol}`);
+                        }
+                    });
+                }
+
+                // Задержка для rate limiting
+                await new Promise(resolve => setTimeout(resolve, 100));
 
             } catch (error) {
-                console.error(`Error processing transaction ${signatureInfo.signature}:`, error.message);
+                console.error(`Error processing transaction: ${error.message}`);
                 continue;
             }
         }
 
-        // Sort by timestamp (newest first)
+        // Сортировка по времени
         transactions.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
-        console.log(`Successfully processed ${transactions.length} real transactions`);
+        console.log(`Page ${page}: processed ${transactions.length} transactions, hasMore: ${hasMore}`);
 
-        // If no real transactions found, return some mock data for testing
-        if (transactions.length === 0) {
-            console.log('No real transactions found, returning mock data for testing');
-            return [
-                {
-                    id: 'mock_' + Date.now() + '_1',
-                    wallet: walletAddress,
-                    type: 'received',
-                    amount: '0.001000',
-                    token: 'SOL',
-                    address: 'Jupiter..Swap',
-                    timestamp: new Date(Date.now() - 3600000).toISOString(), // 1 hour ago
-                    signature: 'mock_signature_1'
-                },
-                {
-                    id: 'mock_' + Date.now() + '_2',
-                    wallet: walletAddress,
-                    type: 'sent',
-                    amount: '0.000500',
-                    token: 'SOL',
-                    address: 'Orca..Pool',
-                    timestamp: new Date(Date.now() - 86400000).toISOString(), // 1 day ago
-                    signature: 'mock_signature_2'
-                },
-                {
-                    id: 'mock_' + Date.now() + '_3',
-                    wallet: walletAddress,
-                    type: 'received',
-                    amount: '0.002000',
-                    token: 'SOL',
-                    address: 'Raydium..LP',
-                    timestamp: new Date(Date.now() - 86400000 * 2).toISOString(), // 2 days ago
-                    signature: 'mock_signature_3'
-                }
-            ];
-        }
-
-        return transactions;
+        return {
+            data: transactions,
+            hasMore: hasMore,
+            totalFetched: allSignatures.length
+        };
 
     } catch (error) {
-        console.error('Error fetching real transactions:', error);
-
-        // If all else fails, return empty array
-        return [];
+        console.error('Error fetching transactions:', error);
+        return {
+            data: page === 1 ? getMockTransactions(walletAddress) : [],
+            hasMore: false,
+            totalFetched: 0
+        };
     }
 }
 
@@ -205,14 +321,23 @@ app.get('/', (req, res) => {
     res.json({
         success: true,
         message: 'CNServer is running!',
+        timestamp: new Date().toISOString(),
+        rpc: SOLANA_RPC
+    });
+});
+
+app.get('/api/health', (req, res) => {
+    res.json({
+        success: true,
+        status: 'healthy',
         timestamp: new Date().toISOString()
     });
 });
 
-// Get transactions
+// Get transactions с пагинацией
 app.get('/api/transaction/list', async (req, res) => {
     try {
-        const { wallet } = req.query;
+        const { wallet, page = 1, limit = 10 } = req.query;
 
         if (!wallet) {
             return res.status(400).json({
@@ -221,30 +346,62 @@ app.get('/api/transaction/list', async (req, res) => {
             });
         }
 
-        // Get real transactions from Solana
-        const transactions = await getRealTransactions(wallet);
+        const pageNum = parseInt(page) || 1;
+        const limitNum = parseInt(limit) || 10;
+
+        console.log(`API request: wallet=${wallet}, page=${pageNum}, limit=${limitNum}`);
+
+        // Валидация Solana адреса
+        try {
+            new PublicKey(wallet);
+        } catch (error) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid Solana wallet address'
+            });
+        }
+
+        const result = await getRealTransactionsPaginated(wallet, pageNum, limitNum);
 
         res.json({
             success: true,
             data: {
-                transactions,
-                count: transactions.length
+                transactions: result.data,
+                count: result.data.length,
+                wallet: wallet,
+                pagination: {
+                    page: pageNum,
+                    limit: limitNum,
+                    hasMore: result.hasMore,
+                    totalFetched: result.totalFetched
+                }
             }
         });
+
     } catch (error) {
-        console.error('Get transactions error:', error);
+        console.error('API error:', error);
         res.status(500).json({
             success: false,
-            error: 'Failed to retrieve transactions'
+            error: 'Failed to retrieve transactions',
+            details: error.message
         });
     }
 });
 
-// Mock endpoint (for testing if needed)
-app.post('/api/transaction/mock', async (req, res) => {
-    res.json({
-        success: true,
-        message: 'Using real transactions now, mock not needed'
+// Error handling
+app.use((error, req, res, next) => {
+    console.error('Unhandled error:', error);
+    res.status(500).json({
+        success: false,
+        error: 'Internal server error'
+    });
+});
+
+// 404 handler
+app.use((req, res) => {
+    res.status(404).json({
+        success: false,
+        error: 'Endpoint not found'
     });
 });
 
@@ -253,14 +410,26 @@ app.listen(PORT, () => {
     console.log(`
 🚀 CNServer Started Successfully!
 🌐 Server URL: http://localhost:${PORT}
+🔗 RPC: ${SOLANA_RPC}
 
 Available Endpoints:
 - GET  /                      - Server info
-- GET  /api/transaction/list  - Get transactions 
-- POST /api/transaction/mock  - Create mock transactions
+- GET  /api/health           - Health check  
+- GET  /api/transaction/list - Get transactions
 
 Ready to accept requests!
     `);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+    console.log('SIGTERM received, shutting down gracefully');
+    process.exit(0);
+});
+
+process.on('SIGINT', () => {
+    console.log('SIGINT received, shutting down gracefully');
+    process.exit(0);
 });
 
 module.exports = app;
